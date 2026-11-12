@@ -3,7 +3,13 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 const NOW = Date.UTC(2026, 10, 12, 12, 0)
 const SESSION = { cwd: '/repo', surface: 'terminal', isInteractive: true } as const
-const RUNNING: AgentInfo = { id: 'a1', description: 'audit the parser', type: 'Explore', status: 'running', name: 'auditor' }
+const RUNNING: AgentInfo = {
+  id: 'a1',
+  description: 'audit the parser',
+  type: 'Explore',
+  status: 'running',
+  name: 'auditor',
+}
 const TRANSCRIPT: SessionMessage[] = [
   { role: 'user', text: 'Audit src/parser.ts for overflow bugs.', toolUses: [] },
   {
@@ -19,11 +25,12 @@ type World = {
   completed: { model: string; prompt: string }[]
   spawned: { prompt: string; subagentType?: string; model?: string }[]
   steps: number
+  sent: string[]
   session: ReturnType<typeof mock.session>
 }
 
-function worldOf(on: On, answers: { answer: string; tools: number }[]): World {
-  const world: World = { agents: [RUNNING], completed: [], spawned: [], steps: 0, session: mock.session(on) }
+function worldOf(on: On, answers: { answer: string; tools: number }[], isSummaryOk = true): World {
+  const world: World = { agents: [RUNNING], completed: [], spawned: [], steps: 0, sent: [], session: mock.session(on) }
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -31,8 +38,13 @@ function worldOf(on: On, answers: { answer: string; tools: number }[]): World {
   on('agent.list', () => ({ value: world.agents }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__compact-agents__${e.name}` } }))
   on('ui.log', () => ({ value: undefined }))
+  on('session.send', ($, e) => {
+    world.sent.push(`${e.to}: ${e.text}`)
+    return { isDelivered: true as const }
+  })
   on('model.complete', ($, e) => {
     world.completed.push({ model: e.model, prompt: e.prompt })
+    if (!isSummaryOk) return { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: USAGE } }
     return { value: { isAnswered: true as const, text: 'COLD NOTE', usage: USAGE } }
   })
   // Core alone sets a spawned agent's id, so under the kit every spawn ends
@@ -77,14 +89,24 @@ const toolResult = (agentId: string) =>
     message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', content: 'ok' }] },
   }) as never
 
-const step = (index: number) => ({ turnId: 't9', index, model: 'claude-sonnet-5-5', messageCount: 4 + index, agentId: 'a1' })
+const step = (index: number) => ({
+  turnId: 't9',
+  index,
+  model: 'claude-sonnet-5-5',
+  messageCount: 4 + index,
+  agentId: 'a1',
+})
 
 describe('compact_agent', () => {
   test('asks the agent for its note on its next tool result and holds the answer back', async ($, on) => {
     const world = worldOf(on, [{ answer: 'WARM NOTE', tools: 0 }])
     await $.session.start(SESSION)
 
-    const called = await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'auditor', focus: 'the overflow' })
+    const called = await $.tool.call({
+      tool: 'mcp__compact-agents__compact_agent',
+      agent: 'auditor',
+      focus: 'the overflow',
+    })
     expect(JSON.stringify(called)).toContain('Agent a1')
 
     await $.session.append(toolResult('a1'))
@@ -100,8 +122,34 @@ describe('compact_agent', () => {
     expect(world.spawned[0]?.prompt).toContain('Audit src/parser.ts for overflow bugs.')
     expect(world.spawned[0]?.subagentType).toBe('Explore')
     expect(world.spawned[0]?.model).toBe('sonnet')
-    // The kit refuses the spawn, so the note is let through as the agent wrote it.
+    // The kit refuses the spawn, so the note is let through as the agent's report.
     expect(JSON.stringify(chunks)).toContain('WARM NOTE')
+    expect(world.sent).toHaveLength(1)
+    expect(world.sent[0]).toContain('main: [compact-agents] Agent a1 wrote its handoff note, but')
+    expect(world.sent[0]).toContain('start an agent with the Agent tool')
+  })
+
+  test('tells the main loop to retry when the cold summary fails, and the agent goes on', async ($, on) => {
+    const world = worldOf(
+      on,
+      [
+        { answer: '', tools: 1 },
+        { answer: '', tools: 1 },
+      ],
+      false,
+    )
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1' })
+    await $.session.append(toolResult('a1'))
+    await drain($.turn.step(step(1)))
+    await $.session.append(toolResult('a1'))
+    await drain($.turn.step(step(2)))
+    const { result } = await drain($.turn.step(step(3)))
+    expect(result.answer).toBe('went on')
+    expect(world.spawned).toHaveLength(0)
+    expect(world.sent.at(-1)).toContain('Call compact_agent on it again to retry')
+    const again = await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1' })
+    expect(JSON.stringify(again)).toContain('is asked for a handoff note')
   })
 
   test('asks once more, then summarizes cold on haiku, when the agent keeps calling tools', async ($, on) => {

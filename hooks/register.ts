@@ -1,4 +1,4 @@
-import type { Hook, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
+import type { EngineInterface, Hook, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
 import type { CompactAgentsHandoff, CompactAgentsState } from '../types'
 import {
@@ -34,6 +34,21 @@ let handoffs: CompactAgentsState = emptyHandoffs()
 /** Agents one copy of the step hook is handling, which the copy beneath must pass by. */
 const handling = new Set<string>()
 
+/**
+ * Tells the main loop how a handoff went, as an agent's message reaches it,
+ * so an idle main loop wakes to read it; a row in its transcript otherwise.
+ */
+async function notify($: EngineInterface, text: string): Promise<void> {
+  const message = `[compact-agents] ${text}`
+  const sent = await $.session.send({ to: 'main', text: message }).catch(() => null)
+  if (sent?.isDelivered === true) return
+  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: message }] } }).catch(() => {})
+}
+
+async function save($: EngineInterface): Promise<void> {
+  await $.state.set({ plugin: 'compact-agents', key: 'handoffs' } as const, handoffs)
+}
+
 const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
   const agentId = e.agentId
   const request = agentId === undefined ? undefined : handoffs.pending[agentId]
@@ -49,45 +64,42 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
     agentId: string,
     request: CompactAgentsHandoff,
   ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-    const save = () => $.state.set({ plugin: 'compact-agents', key: 'handoffs' } as const, handoffs)
     const log = (line: string) => $.ui.log(line, { to: 'transcript' })
-    const fail = async (why: string) => {
+    const drop = async () => {
       delete handoffs.pending[agentId]
-      await save()
-      log(`could not hand off subagent ${agentId}: ${why}; it goes on as it was`)
-      await $.session
-        .append({
-          message: {
-            type: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `[compact-agents] Agent ${agentId} was not handed off (${why}). It goes on as it was.`,
-              },
-            ],
-          },
-        })
-        .catch(() => {})
+      await save($)
     }
-    const handOff = async (note: string): Promise<string | null> => {
+    /** The agent goes on as it was, so the main loop may ask again. */
+    const giveUp = async (why: string) => {
+      await drop()
+      log(`could not hand off subagent ${agentId}: ${why}; it goes on as it was`)
+      await notify(
+        $,
+        `Agent ${agentId} was not compacted: ${why}. It is still running as it was. ` +
+          'Call compact_agent on it again to retry.',
+      )
+    }
+    /** Starts the agent that continues from `note`. */
+    const handOff = async (note: string): Promise<{ newId: string } | { why: string }> => {
       const agent = findAgent(await $.agent.list(), agentId)
       const messages = await $.session.messages({ agentId })
       const alias = aliasOf(e.model)
-      const spawned = await $.agent.spawn({
-        prompt: replacementPrompt(Array.isArray(messages) ? briefOf(messages) : '', note, agentId),
-        description: agent?.description ?? 'continued task',
-        ...(alias === undefined ? {} : { model: alias }),
-        ...(agent !== null && agent.type !== '' && agent.type !== 'teammate' ? { subagentType: agent.type } : {}),
-      })
+      const spawned = await $.agent
+        .spawn({
+          prompt: replacementPrompt(Array.isArray(messages) ? briefOf(messages) : '', note, agentId),
+          description: agent?.description ?? 'continued task',
+          ...(alias === undefined ? {} : { model: alias }),
+          ...(agent !== null && agent.type !== '' && agent.type !== 'teammate' ? { subagentType: agent.type } : {}),
+        })
+        .catch((error: unknown) => ({ deny: String(error) }))
       const newId = 'agentId' in spawned ? spawned.agentId : undefined
       if (newId === undefined) {
-        await fail(`the new agent was refused: ${'deny' in spawned ? String(spawned.deny) : 'no id came back'}`)
-        return null
+        const why = 'deny' in spawned && spawned.deny !== undefined ? String(spawned.deny) : 'no id came back'
+        return { why: `the agent to continue it could not be started: ${why}` }
       }
-      delete handoffs.pending[agentId]
-      await save()
+      await drop()
       log(`subagent ${agentId} handed off to ${newId}`)
-      return newId
+      return { newId }
     }
     const ended = (newId: string): TurnStepResult => ({
       turnId: e.turnId,
@@ -99,8 +111,7 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
     })
 
     if ((await $.clock.now()) - request.at > PENDING_MAX_AGE_MS) {
-      delete handoffs.pending[agentId]
-      await save()
+      await drop()
       return yield* next(e)
     }
 
@@ -118,27 +129,40 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
       const note = response.answer.trim()
       if (response.toolUses.length === 0 && note !== '') {
         const usage = response.usage
-        if (usage !== null) {
-          log(
-            `subagent ${agentId} wrote its note: ${usage.cache_read_input_tokens} tokens read from the cache, ` +
-              `${usage.input_tokens + usage.cache_creation_input_tokens} not`,
+        const cached =
+          usage === null ? '' : ` (${usage.cache_read_input_tokens} tokens of it read from the prompt cache)`
+        log(`subagent ${agentId} wrote its note${cached}`)
+        const outcome = await handOff(note)
+        if ('newId' in outcome) {
+          await notify(
+            $,
+            `Agent ${agentId} was compacted: agent ${outcome.newId} continues its task from a handoff note${cached}. ` +
+              `Send follow-ups to ${outcome.newId}; its result reaches you when it finishes.`,
           )
-        }
-        const newId = await handOff(note)
-        if (newId !== null) {
-          const done = ended(newId)
+          const done = ended(outcome.newId)
           yield { kind: 'text', index: 0, text: done.answer }
           yield { kind: 'stop', stopReason: 'end_turn', usage: response.usage }
           return { ...done, usage: response.usage }
         }
+        // The note ended the agent's turn, so the agent stops with it as its report.
+        await drop()
+        log(`could not hand off subagent ${agentId}: ${outcome.why}`)
+        await notify(
+          $,
+          `Agent ${agentId} wrote its handoff note, but ${outcome.why}. Agent ${agentId} has stopped and its ` +
+            'final report is the note. To go on, start an agent with the Agent tool and give it that report.',
+        )
       } else if (response.toolUses.length > 0) {
         request.isAsked = false
-        await save()
+        await save($)
         log(
-          `subagent ${agentId} called a tool instead of writing its note; ${request.asks < MAX_ASKS ? 'asking again' : `writing it cold on ${COLD_MODEL}`}`,
+          `subagent ${agentId} called a tool instead of writing its note; ` +
+            (request.asks < MAX_ASKS ? 'asking again' : `writing it cold on ${COLD_MODEL}`),
         )
       } else {
-        await fail('it wrote no note')
+        await drop()
+        log(`subagent ${agentId} ended without writing a note`)
+        await notify($, `Agent ${agentId} ended without writing its handoff note (${response.stopReason}).`)
       }
       for (const chunk of held) yield chunk
       return response
@@ -149,7 +173,7 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
     // The agent would not write its note: summarize the transcript cold, on the cheap model.
     const messages = await $.session.messages({ agentId })
     if (!Array.isArray(messages) || messages.length === 0) {
-      await fail('its transcript could not be read')
+      await giveUp('its transcript could not be read')
       return yield* next(e)
     }
     log(`subagent ${agentId} paused: summarizing ${messages.length} messages on ${COLD_MODEL}`)
@@ -164,12 +188,20 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
       { signal: next.signal },
     )
     if (!summary.isAnswered || summary.text.trim() === '') {
-      await fail(summary.isAnswered ? 'the summary came back empty' : `the summary failed: ${summary.reason}`)
+      await giveUp(summary.isAnswered ? 'the summary came back empty' : `the summary failed (${summary.reason})`)
       return yield* next(e)
     }
-    const newId = await handOff(summary.text.trim())
-    if (newId === null) return yield* next(e)
-    const done = ended(newId)
+    const outcome = await handOff(summary.text.trim())
+    if ('why' in outcome) {
+      await giveUp(outcome.why)
+      return yield* next(e)
+    }
+    await notify(
+      $,
+      `Agent ${agentId} was compacted: it would not write a handoff note, so its transcript was summarized on ` +
+        `${COLD_MODEL}, and agent ${outcome.newId} continues from that. Send follow-ups to ${outcome.newId}.`,
+    )
+    const done = ended(outcome.newId)
     yield { kind: 'text', index: 0, text: done.answer }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
     return done
@@ -218,7 +250,7 @@ export const register: Register = (on) => {
     return {
       result:
         `Agent ${agent.id} is asked for a handoff note once its current tool call finishes, then stops. ` +
-        'Its final answer will name the agent that takes over.',
+        'You will get a message naming the agent that takes over, or saying why it failed.',
     }
   })
 
