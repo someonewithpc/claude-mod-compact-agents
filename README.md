@@ -23,21 +23,34 @@ Claude calls `compact_agent` with a subagent's id or name, and optionally a
    cache and 5,421 uncached.
 3. The mod holds that answer back and starts a new agent of the same type and
    model family, with the original brief and the note as its prompt.
-4. The old agent stops. Its last answer names the new agent's id, and the new
-   agent reports back to Claude when it finishes, like any background agent.
+4. The old agent stops, and the new agent reports back to Claude when it
+   finishes, like any background agent.
+
+## What Claude hears
+
+The tool answers right away, and the handoff then happens at the subagent's
+pace. Each outcome reaches Claude as a message, the way a subagent's report
+does, so an idle session wakes to read it. On success the message names the new
+agent and says how much of the note request the prompt cache served. An agent
+that finished before it could be handed off gets a message saying so. If the
+handoff fails, the agent still runs as it was, and Claude can call
+`compact_agent` on it again. If the note was written but the new agent couldn't
+be started after two tries, the old agent has stopped with the note as its
+report, and Claude can start an agent from it with the Agent tool.
 
 If the subagent calls a tool instead of writing the note, the mod asks once
-more. If it still won't, the mod summarizes the transcript itself on Haiku, with
-no cache to read, as the cheapest way to read all of it cold. If the summary or
-the new agent fails, the subagent goes on as it was and Claude gets a note
-saying why.
+more. If it still won't, the mod summarizes the transcript on Haiku, with no
+cache to read, since that is the cheapest model to read it all cold.
+
+A second call while a handoff is under way says so and changes nothing. A call
+that names an agent already handed off points to the one that took over.
 
 The handoff changes the agent's id. SendMessage to the old one reaches a
 finished agent, so follow-ups go to the new id.
 
 ## Install
 
-Needs Claude Code 2.1.316 or later. At the Claude Code prompt:
+Needs Claude Code 2.1.316 or later; tested on 2.1.316 and 2.1.323. At the Claude Code prompt:
 
 ```
 /plugin install compact-agents --marketplace someonewithpc/claude-mod-compact-agents
@@ -69,7 +82,9 @@ manifest and the hooks module. Claude Code writes the API's types to
 `tsc`, so `tsc -p .` type-checks against them.
 
 The test kit can't hand back a spawned agent's id, so the tests stop short of a
-finished handoff. That part was checked by hand in a live session.
+finished handoff. Live sessions on Haiku covered that part, with a second call
+during a handoff, an agent that finished first, a subagent that called a tool
+instead of writing its note, and a replacement refused by a PreToolUse hook.
 
 Written with [Claude Code](https://claude.com/claude-code).
 
