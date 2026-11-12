@@ -242,6 +242,17 @@ export const register: Register = (on) => {
     if (agent.teammateId !== undefined) {
       return { result: `Agent ${agent.id} is a teammate; only subagents can be handed off.`, isError: true }
     }
+    const existing = handoffs.pending[agent.id]
+    if (existing !== undefined) {
+      if (existing.asks === 0 && focus !== '') existing.focus = focus
+      await $.state.set({ plugin: 'compact-agents', key: 'handoffs' } as const, handoffs)
+      return {
+        result:
+          `Agent ${agent.id} is already being compacted` +
+          (existing.asks === 0 ? '; it is asked for its note once its current tool call finishes.' : '.') +
+          ' You will get a message when it is done or has failed.',
+      }
+    }
     handoffs.pending[agent.id] = { focus, at: await $.clock.now(), asks: 0, isAsked: false }
     await $.state.set({ plugin: 'compact-agents', key: 'handoffs' } as const, handoffs)
     $.ui.log(`subagent ${agent.id} (${agent.description}) is handed off after its current tool call`, {

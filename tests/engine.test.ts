@@ -130,6 +130,17 @@ describe('compact_agent', () => {
     expect(world.sent[0]).toContain('start an agent with the Agent tool')
   })
 
+  test('answers a second call while the first is under way without starting over', async ($, on) => {
+    const world = worldOf(on, [{ answer: 'WARM NOTE', tools: 0 }])
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1' })
+    await $.session.append(toolResult('a1'))
+    const again = await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1', focus: 'late' })
+    expect(JSON.stringify(again)).toContain('already being compacted')
+    await drain($.turn.step(step(1)))
+    expect(world.spawned.length).toBeGreaterThan(0)
+  })
+
   test('tells the main loop when the agent finishes before it can be compacted, and lets it ask again', async ($, on) => {
     const world = worldOf(on, [])
     await $.session.start(SESSION)
