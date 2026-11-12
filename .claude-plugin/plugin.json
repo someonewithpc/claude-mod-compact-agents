@@ -1,0 +1,12 @@
+{
+  "name": "compact-agents",
+  "displayName": "Compact agents",
+  "version": "0.1.0",
+  "description": "Lets Claude compact a running subagent: the subagent pauses at its next model request, its transcript becomes a handoff note, and a fresh agent carries on from it.",
+  "author": { "name": "Hugo Sales" },
+  "homepage": "https://github.com/someonewithpc/claude-mod-compact-agents",
+  "repository": "https://github.com/someonewithpc/claude-mod-compact-agents",
+  "license": "MIT",
+  "keywords": ["compact", "subagent", "context", "handoff"],
+  "types": "./types/index.d.ts"
+}
