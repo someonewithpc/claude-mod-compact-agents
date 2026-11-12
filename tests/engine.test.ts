@@ -118,7 +118,7 @@ describe('compact_agent', () => {
 
     const { chunks } = await drain($.turn.step(step(1)))
     expect(world.completed).toHaveLength(0)
-    expect(world.spawned).toHaveLength(1)
+    expect(world.spawned).toHaveLength(2)
     expect(world.spawned[0]?.prompt).toContain('WARM NOTE')
     expect(world.spawned[0]?.prompt).toContain('Audit src/parser.ts for overflow bugs.')
     expect(world.spawned[0]?.subagentType).toBe('Explore')

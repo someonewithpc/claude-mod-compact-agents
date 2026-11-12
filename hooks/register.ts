@@ -79,27 +79,30 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
           'Call compact_agent on it again to retry.',
       )
     }
-    /** Starts the agent that continues from `note`. */
+    /** Starts the agent that continues from `note`; tries twice, as a refusal may be passing. */
     const handOff = async (note: string): Promise<{ newId: string } | { why: string }> => {
       const agent = findAgent(await $.agent.list(), agentId)
       const messages = await $.session.messages({ agentId })
       const alias = aliasOf(e.model)
-      const spawned = await $.agent
-        .spawn({
-          prompt: replacementPrompt(Array.isArray(messages) ? briefOf(messages) : '', note, agentId),
-          description: agent?.description ?? 'continued task',
-          ...(alias === undefined ? {} : { model: alias }),
-          ...(agent !== null && agent.type !== '' && agent.type !== 'teammate' ? { subagentType: agent.type } : {}),
-        })
-        .catch((error: unknown) => ({ deny: String(error) }))
-      const newId = 'agentId' in spawned ? spawned.agentId : undefined
-      if (newId === undefined) {
-        const why = 'deny' in spawned && spawned.deny !== undefined ? String(spawned.deny) : 'no id came back'
-        return { why: `the agent to continue it could not be started: ${why}` }
+      let why = 'no id came back'
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const spawned = await $.agent
+          .spawn({
+            prompt: replacementPrompt(Array.isArray(messages) ? briefOf(messages) : '', note, agentId),
+            description: agent?.description ?? 'continued task',
+            ...(alias === undefined ? {} : { model: alias }),
+            ...(agent !== null && agent.type !== '' && agent.type !== 'teammate' ? { subagentType: agent.type } : {}),
+          })
+          .catch((error: unknown) => ({ deny: String(error) }))
+        const newId = 'agentId' in spawned ? spawned.agentId : undefined
+        if (newId !== undefined) {
+          await drop()
+          log(`subagent ${agentId} handed off to ${newId}`)
+          return { newId }
+        }
+        if ('deny' in spawned && spawned.deny !== undefined) why = String(spawned.deny)
       }
-      await drop()
-      log(`subagent ${agentId} handed off to ${newId}`)
-      return { newId }
+      return { why: `the agent to continue it could not be started: ${why}` }
     }
     const ended = (newId: string): TurnStepResult => ({
       turnId: e.turnId,
