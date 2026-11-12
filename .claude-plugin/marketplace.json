@@ -1,0 +1,5 @@
+{
+  "name": "claude-mod-compact-agents",
+  "owner": { "name": "Hugo Sales" },
+  "plugins": [{ "name": "compact-agents", "source": "./" }]
+}
