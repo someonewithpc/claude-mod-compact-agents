@@ -42,6 +42,7 @@ function worldOf(on: On, answers: { answer: string; tools: number }[], isSummary
     world.sent.push(`${e.to}: ${e.text}`)
     return { isDelivered: true as const }
   })
+  on('turn.complete', ($, e) => ({ text: e.answer }))
   on('model.complete', ($, e) => {
     world.completed.push({ model: e.model, prompt: e.prompt })
     if (!isSummaryOk) return { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: USAGE } }
@@ -127,6 +128,23 @@ describe('compact_agent', () => {
     expect(world.sent).toHaveLength(1)
     expect(world.sent[0]).toContain('main: [compact-agents] Agent a1 wrote its handoff note, but')
     expect(world.sent[0]).toContain('start an agent with the Agent tool')
+  })
+
+  test('tells the main loop when the agent finishes before it can be compacted, and lets it ask again', async ($, on) => {
+    const world = worldOf(on, [])
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1' })
+    await $.turn.complete({
+      answer: 'done',
+      durationMs: 1,
+      isAborted: false,
+      turnId: 't9',
+      reason: 'answer',
+      agentId: 'a1',
+    })
+    expect(world.sent.at(-1)).toContain('Agent a1 finished before it could be compacted')
+    const again = await $.tool.call({ tool: 'mcp__compact-agents__compact_agent', agent: 'a1' })
+    expect(JSON.stringify(again)).not.toContain('already being compacted')
   })
 
   test('tells the main loop to retry when the cold summary fails, and the agent goes on', async ($, on) => {

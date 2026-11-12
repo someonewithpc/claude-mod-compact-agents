@@ -254,6 +254,16 @@ export const register: Register = (on) => {
     }
   })
 
+  on('turn.complete', { agentId: /./ }, async ($, e, next) => {
+    const result = await next(e)
+    const agentId = e.agentId
+    if (agentId === undefined || handoffs.pending[agentId] === undefined || handling.has(agentId)) return result
+    delete handoffs.pending[agentId]
+    await $.state.set({ plugin: 'compact-agents', key: 'handoffs' } as const, handoffs)
+    await notify($, `Agent ${agentId} finished before it could be compacted, so there was nothing to hand off.`)
+    return result
+  })
+
   // The request rides on the agent's next tool result, so the request after
   // it opens with the agent's own cached prefix.
   on('session.append', { door: 'tool-result', agentId: /./ }, async ($, e, next) => {
