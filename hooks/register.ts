@@ -130,6 +130,11 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
       }
       const response = step.value
       const note = response.answer.trim()
+      if (response.stopReason === null) {
+        // No response came; the engine sends the step again, still asking.
+        for (const chunk of held) yield chunk
+        return response
+      }
       if (response.toolUses.length === 0 && note !== '') {
         const usage = response.usage
         const cached =
