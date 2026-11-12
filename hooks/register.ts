@@ -33,6 +33,8 @@ const DESCRIPTION = [
 let handoffs: CompactAgentsState = emptyHandoffs()
 /** Agents one copy of the step hook is handling, which the copy beneath must pass by. */
 const handling = new Set<string>()
+/** The agent that took over from each one handed off, for a later call that names the old one. */
+const successors = new Map<string, string>()
 
 /**
  * Tells the main loop how a handoff went, as an agent's message reaches it,
@@ -97,6 +99,7 @@ const handoffStep: Hook<'turn.step'> = async function* ($, e, next) {
         const newId = 'agentId' in spawned ? spawned.agentId : undefined
         if (newId !== undefined) {
           await drop()
+          successors.set(agentId, newId)
           log(`subagent ${agentId} handed off to ${newId}`)
           return { newId }
         }
@@ -243,7 +246,19 @@ export const register: Register = (on) => {
     const focus = typeof e.focus === 'string' ? e.focus.trim() : ''
     if (ref === '') return { result: 'Name the subagent to compact: its id or name.', isError: true }
     const agent = findAgent(await $.agent.list(), ref)
-    if (agent === null) return { result: `No agent of this session is called ${ref}.`, isError: true }
+    if (agent === null) {
+      const successor = successors.get(ref)
+      if (successor !== undefined) {
+        return {
+          result: `Agent ${ref} was already handed off to ${successor}; compact ${successor} instead.`,
+          isError: true,
+        }
+      }
+      return {
+        result: `No running agent of this session is called ${ref}. It may have finished; Claude Code drops finished agents from its list.`,
+        isError: true,
+      }
+    }
     if (!isLive(agent)) {
       return { result: `Agent ${agent.id} is ${agent.status}: there is nothing running to compact.`, isError: true }
     }
